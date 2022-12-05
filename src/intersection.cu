@@ -8,7 +8,7 @@ using namespace std;
 #define SIZE_X 2
 #define SIZE_Y 2
 #define ACTION_SIZE 2
-#define MAX_VEHICLE_NUM 6
+#define MAX_VEHICLE_NUM 8
 
 #define BLOCK_SIZE 1024
 
@@ -20,7 +20,8 @@ using namespace std;
 
 #define VERBOSE 0
 
-#define NUM_TRAIN 10000
+#define NUM_TRAIN 30000
+#define NUM_TEST 10000
 
 #define DEBUG 0
 
@@ -241,11 +242,11 @@ public:
     }
     
     void choose_max_action() {
-        double max_action_val = 0;
+        double max_action_val = DBL_MIN;
         int state_offset = this -> cur_state_int;
         this -> cur_action = 0;
         for (int i = 0; i < this -> action_size; i++) {
-            int val = this -> q_table.get_value(state_offset + i, i);
+            int val = this -> q_table.get_value(state_offset, i);
             if (val > max_action_val) {
                 max_action_val = val;
                 this -> cur_action = i;
@@ -370,21 +371,40 @@ public:
     }
 
     double get_reward() {
-        double next_reward = 0;
-        int larger_val_h = this -> next_state[2] > this -> next_state[3] ? this -> next_state[2] : this -> next_state[3];
-        int larger_val_v = this -> next_state[0] > this -> next_state[1] ? this -> next_state[0] : this -> next_state[1];
-        if (this -> cur_action == 0) {
-            next_reward += larger_val_v * 0.3;
-            next_reward -= larger_val_h * larger_val_h / this -> max_vehicle_num;
+        // double next_reward = 0;
+        // int larger_val_h = this -> next_state[2] > this -> next_state[3] ? this -> next_state[2] : this -> next_state[3];
+        // int larger_val_v = this -> next_state[0] > this -> next_state[1] ? this -> next_state[0] : this -> next_state[1];
+        // if (this -> cur_action == 0) {
+        //     next_reward += larger_val_v * 0.3;
+        //     next_reward -= larger_val_h * larger_val_h / this -> max_vehicle_num;
+        // }
+        // else {
+        //     next_reward += larger_val_h * 0.3;
+        //     next_reward -= larger_val_v * larger_val_v / this -> max_vehicle_num;
+        // }
+
+        int max_next_lane_num = 0;
+        for (int i = 0; i < this -> lane_size; i++){
+            if (this -> next_state[i] > max_next_lane_num) {
+                max_next_lane_num = this -> next_state[i];
+            }
         }
-        else {
-            next_reward += larger_val_h * 0.3;
-            next_reward -= larger_val_v * larger_val_v / this -> max_vehicle_num;
-        } 
-        int next_vehicle_num = this -> cal_vehicle_num(this -> next_state);
-        int cur_vehicle_num = this -> cal_vehicle_num(this -> cur_state);
+        int max_cur_lane_num = 0;
+        for (int i = 0; i < this -> lane_size; i++){
+            if (this -> cur_state[i] > max_cur_lane_num) {
+                max_cur_lane_num = this -> cur_state[i];
+            }
+        }
+        double in_vehicle_num = 0;
+        for (int i = 0; i < this -> lane_size; i++){
+            in_vehicle_num += this -> in_vehicle[i];
+        }
+        double reward = max_cur_lane_num * max_cur_lane_num - max_next_lane_num * max_next_lane_num - in_vehicle_num * 0.025;
+
+        // int next_vehicle_num = this -> cal_vehicle_num(this -> next_state);
+        // int cur_vehicle_num = this -> cal_vehicle_num(this -> cur_state);
         //reward = cur_vehicle_num - next_vehicle_num;
-        return next_reward;
+        return reward;
     }
 
     double get_cur_q_value() {
@@ -432,6 +452,7 @@ public:
     }
 
     void print_status() {
+        cout << "action: " << this -> cur_action << " q_val: " << this -> q_table.get_value(this -> cur_state_int, 0) << " " << this -> q_table.get_value(this -> cur_state_int, 1)<< endl;
         for (int i = 0; i < this -> lane_size; i++){
             cout << this -> cur_state[i] << " ";
         }
@@ -578,7 +599,7 @@ public:
             if (i % size_x != size_x - 1 && mesh[id].get_out_vehicle(2)) {
                 this -> mesh[i].increase_in_vehicle(3);
             }
-            this -> mesh[i].update_with_in_vehicle();
+            //this -> mesh[i].update_with_in_vehicle();
         }
     }
 
@@ -633,12 +654,18 @@ public:
 
             double q_value = 0;
             q_value += (1 - this->alpha) * this -> mesh[i].get_cur_q_value();
-            q_value += this -> alpha * (reward[i] + this -> beta * surrounding_reward);
+            q_value += this -> alpha * (reward[i]) + this -> beta * surrounding_reward;
             q_value += this -> alpha * this -> mesh[i].get_next_q_value();
             #if DEBUG
-                cout << "update q value - intersection: " << i << " surrounding:" << surrounding_reward << " q value: " << q_value << endl;
+                cout << "update q value - intersection: " << i << " reward: " << reward[i] << " surrounding: " << surrounding_reward << " q value: " << q_value << endl;
             #endif
             this -> mesh[i].set_q_value(q_value);
+        }
+    }
+
+    void update_in_vehicle() {
+        for (int i = 0; i < this -> mesh_size; i++) {
+            this -> mesh[i].update_with_in_vehicle();
         }
     }
 
@@ -680,8 +707,9 @@ public:
     }
 
     void print() {
+        cout << "================" << endl;
         for (int i = 0; i < this -> mesh_size; i++) {
-            cout << "intersection: " << i << endl;
+            //cout << "intersection: " << i << endl;
             this -> mesh[i].print_q_table();
         }
     }
@@ -717,6 +745,7 @@ public:
                 this -> update_out_vehicle();
                 this -> sync();
                 this -> update_q_value();
+                this -> update_in_vehicle();
 
                 this -> generate_new_vehicle();
                 this -> take_next_state();
@@ -731,7 +760,7 @@ public:
         int train_step = 0;
         this -> reset();
         while (!this -> is_end_state()) {
-            if (train_step > 1000000) {
+            if (train_step > NUM_TEST) {
                 cout << "Run succeed" << endl;
                 break;
             }
@@ -742,8 +771,8 @@ public:
                 }
             #endif
 
+            cout << "step: " << train_step << endl;
             for (int i = 0; i < this -> mesh_size; i++) {
-                cout << "intersection: " << i << endl;
                 this -> mesh[i].print_status();
             }
 
@@ -751,7 +780,8 @@ public:
             this -> get_next_state();
             this -> update_out_vehicle();
             this -> sync();
-            this -> update_q_value();
+            //this -> update_q_value();
+            this -> update_in_vehicle();
 
             this -> generate_new_vehicle();
             this -> take_next_state();
