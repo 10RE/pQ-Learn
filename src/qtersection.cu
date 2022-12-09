@@ -17,11 +17,12 @@ using namespace std;
 
 #define LANE_SIZE 4
 
-#define ENV_ITEM_SIZE 14
+#define ENV_ITEM_SIZE 15
 
 #define ENV_SIZE MESH_SIZE*ENV_ITEM_SIZE
 
 #define BLOCK_SIZE 1024
+#define BLOCK_SQUARE_SIZE 32
 
 #define ALPHA 0.5
 #define BETA 0.1 //decay reward from surroundings
@@ -44,46 +45,65 @@ using namespace std;
 1: cur_state_down
 2: cur_state_left
 3: cur_state_right
-4: next_state_up
-5: next_state_down
-6: next_state_left
-7: next_state_right
-8: reward
-9: action
-10: in_vehicle_up
-11: in_vehicle_down
-12: in_vehicle_left
-13: in_vehicle_right
+4: cur_state_id
+5: next_state_up
+6: next_state_down
+7: next_state_left
+8: next_state_right
+9: next_state_id
+10: action
+11: in_vehicle_up
+12: in_vehicle_down
+13: in_vehicle_left
+14: in_vehicle_right
 */
-__device__ double get_env(double* env, int id) {
-    return env[id];
+//action
+__device__ int get_env(int* env, int mesh_id, int item_id) {
+    return env[mesh_id * ENV_ITEM_SIZE + item_id];
 }
 
-__device__ void set_env(double* env, int id, double value) {
+__device__ void set_env(int* env, int mesh_id, int item_id, double value) {
+    env[mesh_id * ENV_ITEM_SIZE + item_id] = value;
+}
+
+__device__ void set_env(int* env, int id, double value) {
     env[id] = value;
 }
 
-__device__ double* get_cur_state(double* env, int id) {
-    return env + id * ENV_ITEM_SIZE;
+
+__device__ int* get_cur_state(int* env, int mesh_id) {
+    return env + mesh_id * ENV_ITEM_SIZE;
 }
 
-__device__ double* get_next_state(double* env, int id) {
-    return env + id * ENV_ITEM_SIZE + 4;
+__device__ int get_cur_state_id(int* env, int mesh_id) {
+    return *(env + mesh_id * ENV_ITEM_SIZE + 4);
 }
 
-__device__ double* get_reward(double* env, int id) {
-    return env + id * ENV_ITEM_SIZE + 8;
+__device__ int* get_next_state(int* env, int mesh_id) {
+    return env + mesh_id * ENV_ITEM_SIZE + 5;
 }
 
-__device__ double* get_action(double* env, int id) {
-    return env + id * ENV_ITEM_SIZE + 9;
+__device__ void set_next_state_id(int* env, int mesh_id, int next_state_id) {
+    *(env + mesh_id * ENV_ITEM_SIZE + 9) = next_state_id;
 }
 
-__device__ double* get_in_vehicle(double* env, int id) {
-    return env + id * ENV_ITEM_SIZE + 10;
+__device__ int get_next_state_id(int* env, int mesh_id) {
+    return *(env + mesh_id * ENV_ITEM_SIZE + 9);
 }
 
-__global__ void reset_env_kernel(double* env) {
+// __device__ double* get_reward(int* env, int id) {
+//     return env + id * ENV_ITEM_SIZE + 8;
+// }
+
+__device__ int get_action(int* env, int mesh_id) {
+    return *(env + mesh_id * ENV_ITEM_SIZE + 8);
+}
+
+__device__ int* get_in_vehicle(int* env, int mesh_id) {
+    return env + mesh_id * ENV_ITEM_SIZE + 9;
+}
+
+__global__ void reset_env_kernel(int* env) {
     int id = threadIdx.x + blockIdx.x * blockDim.x;
     if (id >= ENV_SIZE) {
         return;
@@ -169,28 +189,119 @@ __device__ double cal_reward_cuda(int* next_state, int* state, int* in_vehicle) 
     return reward;
 }
 
-__device__ void choose_action_cuda()
+__device__ int choose_action_cuda(int mesh_id, double* q_table, int* env) {//, double* max_q) {
+    int state_id = get_cur_state_id(env, mesh_id);
+    double max_q_value = get_max_q_value_in_action_cuda(q_table, mesh_id, state_id);
+    //*max_q = max_q_value;
+    int action_id = 0;
+    for (int i = 0; i < ACTION_SIZE; i++) {
+        double value = get_value_cuda(q_table, mesh_id, state_id, i);
+        if (value == max_q_value) {
+            action_id = i;
+            break;
+        }
+    }
+    return action_id;
+}
 
-__global__ void update_env_pre_kernel(double* environment, double* q_table) {
-    int id = threadIdx.x + blockIdx.x * blockDim.x;
-    if (id > ENV_SIZE) {
+__device__ void cal_vehicle_out (int* environment, int mesh_id, int action) {
+    if (action == 0) {
+        set_env(environment, mesh_id, 13, get_cur_state(environment, mesh_id)[0] > 0 ? 1 : 0);
+        set_env(environment, mesh_id, 14, get_cur_state(environment, mesh_id)[1] > 0 ? 1 : 0);
+    }
+    else {
+        set_env(environment, mesh_id, 11, get_cur_state(environment, mesh_id)[2] > 0 ? 1 : 0);
+        set_env(environment, mesh_id, 12, get_cur_state(environment, mesh_id)[3] > 0 ? 1 : 0);
+    }
+}
+
+__device__ void update_vehicle_in_with_out (int* environment, int mesh_id, int action) {
+    if (action == 0) {
+        set_env(environment, mesh_id, 11, get_in_vehicle(environment, mesh_id)[2]);
+        set_env(environment, mesh_id, 12, get_in_vehicle(environment, mesh_id)[3]);
+    }
+    else {
+         set_env(environment, mesh_id, 13, get_in_vehicle(environment, mesh_id)[0]);
+        set_env(environment, mesh_id, 14, get_in_vehicle(environment, mesh_id)[1]);
+    }
+}
+
+__global__ void update_env_pre_kernel(int* environment, double* q_table) {
+    int x = threadIdx.x + blockIdx.x * blockDim.x;
+    int y = threadIdx.y + blockIdx.y * blockDim.y;
+    int id = x + y * blockDim.x * gridDim.x;
+    if (id > MESH_SIZE) {
+        return;
+    }
+    int action = choose_action_cuda(id, q_table, environment);
+    int* state = get_cur_state(environment, id);
+    int next_state_id = get_next_state_cuda(get_next_state(environment, id), state, action);
+    set_next_state_id(environment, id, next_state_id);
+    cal_vehicle_out(environment, id, action);
+    update_vehicle_in_with_out(environment, id, action);
+}
+
+__global__ void update_reward_kernel(int* environment, double* reward) {
+    int x = threadIdx.x + blockIdx.x * blockDim.x;
+    int y = threadIdx.y + blockIdx.y * blockDim.y;
+    int mesh_id = x + y * blockDim.x * gridDim.x;
+    if (mesh_id > MESH_SIZE) {
         return;
     }
 
+    int max_next_lane_num = 0;
+    for (int i = 0; i < LANE_SIZE; i++){
+        int* next_state = get_next_state(environment, mesh_id);
+        if (next_state[i] > max_next_lane_num) {
+            max_next_lane_num = next_state[i];
+        }
+    }
+    int max_cur_lane_num = 0;
+    for (int i = 0; i < LANE_SIZE; i++){
+        int* cur_state = get_cur_state(environment, mesh_id);
+        if (cur_state[i] > max_cur_lane_num) {
+            max_cur_lane_num = cur_state[i];
+        }
+    }
+
+    double in_vehicle_num = 0;
+    for (int i = 0; i < LANE_SIZE; i++){
+        in_vehicle_num += get_in_vehicle(environment, mesh_id)[i];
+    }
+    double reward = max_cur_lane_num * max_cur_lane_num - max_next_lane_num * max_next_lane_num - in_vehicle_num * 0.025;
+
+    double surrounding_reward = 0;
+
+    int id = i - this -> size_x;
+    if (id > 0) {
+        surrounding_reward += reward[id];
+    }
+    id = i + this -> size_x;
+    if (id < this -> mesh_size) {
+        surrounding_reward += reward[id];
+    }
+    id = i - 1;
+    if (i % size_x != 0) {
+        surrounding_reward += reward[id];
+    }
+    id = i + 1;
+    if (i % size_x != size_x - 1) {
+        surrounding_reward += reward[id];
+    };
 }
 
-__global__ void cal_q_kernel_single(double* environment, double* q_table, double mesh_id) {
+__global__ void cal_q_kernel_single(int* environment, double* q_table, double mesh_id) {
     int id = threadIdx.x + blockIdx.x * blockDim.x;
     int action = threadIdx.y;
     if (id >= SURROUNDING_SIZE) {
         return;
     }
-    double* state = get_cur_state(environment, id);
+    int* state = get_cur_state(environment, id);
     int* actual_state = new int[LANE_SIZE];
     int* next_state = new int[LANE_SIZE];
     for (int i = 0; i < LANE_SIZE; i++){
         if ((id - 2) / 2 == i) {
-            int tmp_state = (int)state[i] + (id % 2 == 0 ? 1 : -1);
+            int tmp_state = state[i] + (id % 2 == 0 ? 1 : -1);
             actual_state[i] = tmp_state > 0 ? (tmp_state < MAX_VEHICLE_NUM ? tmp_state : MAX_VEHICLE_NUM) : 0;
         }
         else {
@@ -1032,16 +1143,26 @@ void train() {
         cout << "qtable malloc failed" << endl;
     }
 
-    double* environment;
-    if (cudaMalloc(&environment, sizeof(double) * ENV_SIZE) != cudaSuccess) {
+    int* environment;
+    if (cudaMalloc(&environment, sizeof(int) * ENV_SIZE) != cudaSuccess) {
         cout << "env malloc failed" << endl;
+    }
+    double* reward;
+    if (cudaMalloc(&reward, sizeof(double) * MESH_SIZE) != cudaSuccess) {
+        cout << "reward malloc failed" << endl;
     }
     dim3 env_block(ENV_SIZE < BLOCK_SIZE ? (ENV_SIZE > 32 ? ENV_SIZE : 32) : BLOCK_SIZE);
     dim3 env_grid(ENV_SIZE / env_block.x + 1);
+    dim3 mesh_block(SIZE_X < BLOCK_SQUARE_SIZE ? SIZE_X : BLOCK_SQUARE_SIZE, SIZE_Y < BLOCK_SQUARE_SIZE ? SIZE_Y : BLOCK_SQUARE_SIZE);
+    dim3 mesh_grid(SIZE_X / mesh_block.x + 1, SIZE_Y / mesh_block.y + 1);
     while (train_step < NUM_TRAIN) {
         cout << "======================" << endl;
         cout << "start epoch: " << epoch_step << endl;
         reset_env_kernel<<<env_grid, env_block>>>(environment);
+        update_env_pre_kernel<<<mesh_grid, mesh_block>>>(environment, qtable)
+        update_reward_kernel<<<mesh_grid, mesh_block>>>(environment, reward);
+
+
 
     }
 }
