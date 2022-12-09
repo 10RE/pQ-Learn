@@ -51,7 +51,7 @@ using namespace std;
 7: next_state_left
 8: next_state_right
 9: next_state_id
-10: action
+10: action // not used
 11: in_vehicle_up
 12: in_vehicle_down
 13: in_vehicle_left
@@ -103,6 +103,10 @@ __device__ int* get_in_vehicle(int* env, int mesh_id) {
     return env + mesh_id * ENV_ITEM_SIZE + 9;
 }
 
+__device__ void increase_in_vehicle(int* env, int mesh_id, int lane) {
+    *(env + mesh_id * ENV_ITEM_SIZE + 9 + lane) += 1;
+}
+
 __global__ void reset_env_kernel(int* env) {
     int id = threadIdx.x + blockIdx.x * blockDim.x;
     if (id >= ENV_SIZE) {
@@ -136,8 +140,8 @@ __device__ double get_value_cuda(double* q_table, int id, int state, int action)
     return q_table[(state * ACTION_SIZE + action) + Q_TABLE_SIZE * id];
 }
 
-__device__ void set_value_cuda(double* q_table, int id_offset, int main_offset, int offset, double value){
-    q_table[main_offset + offset + id_offset] = value;
+__device__ void set_value_cuda(double* q_table, int id, int state, int action, double value){
+    q_table[(state * ACTION_SIZE + action) + Q_TABLE_SIZE * id] = value;
 }
 
 // __global__ void get_max_q_value_in_action(double* max_q, double* isMAX, double* q_table, int state) {
@@ -219,10 +223,21 @@ __device__ void update_vehicle_in_with_out (int* environment, int mesh_id, int a
     if (action == 0) {
         set_env(environment, mesh_id, 11, get_in_vehicle(environment, mesh_id)[2]);
         set_env(environment, mesh_id, 12, get_in_vehicle(environment, mesh_id)[3]);
+        set_env(environment, mesh_id, 13, 0);
+        set_env(environment, mesh_id, 14, 0);
     }
     else {
          set_env(environment, mesh_id, 13, get_in_vehicle(environment, mesh_id)[0]);
         set_env(environment, mesh_id, 14, get_in_vehicle(environment, mesh_id)[1]);
+        set_env(environment, mesh_id, 11, 0);
+        set_env(environment, mesh_id, 12, 0);
+    }
+}
+
+__device__ void update_vehicle_in (int* environment, int mesh_id) {
+    for (int i = 0; i < LANE_SIZE; i++) {
+        set_env(environment, mesh_id, 0 + i, get_in_vehicle(environment, mesh_id)[i]);
+        set_env(environment, mesh_id, 11 + i, 0);
     }
 }
 
@@ -235,7 +250,7 @@ __global__ void update_env_pre_kernel(int* environment, double* q_table) {
     }
     int action = choose_action_cuda(id, q_table, environment);
     int* state = get_cur_state(environment, id);
-    int next_state_id = get_next_state_cuda(get_next_state(environment, id), state, action);
+    int next_state_id = get_next_state_cuda(get_next_state(environment, id), state, action);  // update next state, get next state id
     set_next_state_id(environment, id, next_state_id);
     cal_vehicle_out(environment, id, action);
     update_vehicle_in_with_out(environment, id, action);
@@ -268,29 +283,10 @@ __global__ void update_reward_kernel(int* environment, double* reward) {
     for (int i = 0; i < LANE_SIZE; i++){
         in_vehicle_num += get_in_vehicle(environment, mesh_id)[i];
     }
-    double reward = max_cur_lane_num * max_cur_lane_num - max_next_lane_num * max_next_lane_num - in_vehicle_num * 0.025;
-
-    double surrounding_reward = 0;
-
-    int id = i - this -> size_x;
-    if (id > 0) {
-        surrounding_reward += reward[id];
-    }
-    id = i + this -> size_x;
-    if (id < this -> mesh_size) {
-        surrounding_reward += reward[id];
-    }
-    id = i - 1;
-    if (i % size_x != 0) {
-        surrounding_reward += reward[id];
-    }
-    id = i + 1;
-    if (i % size_x != size_x - 1) {
-        surrounding_reward += reward[id];
-    };
+    reward[mesh_id] = max_cur_lane_num * max_cur_lane_num - max_next_lane_num * max_next_lane_num - in_vehicle_num * 0.025;
 }
 
-__global__ void cal_q_kernel_single(int* environment, double* q_table, double mesh_id) {
+__global__ void cal_q_kernel_single(int* environment, double* reward, double* q_table, int mesh_id) {
     int id = threadIdx.x + blockIdx.x * blockDim.x;
     int action = threadIdx.y;
     if (id >= SURROUNDING_SIZE) {
@@ -318,44 +314,108 @@ __global__ void cal_q_kernel_single(int* environment, double* q_table, double me
     double cur_q = get_value_cuda(q_table, mesh_id, state_int, action);
     int next_state_int = get_next_state_cuda(next_state, actual_state, action);
 
-    double max_q = 0;
-    max_q = get_max_q_value_in_action_cuda(q_table, mesh_id, state_int);
+    double next_q = 0;
+    next_q = get_max_q_value_in_action_cuda(q_table, mesh_id, next_state_int);
 
     //get_max_q_value_in_action<<<ACTION_SIZE, ACTION_SIZE>>>(&max_q, isMAX, q_table, next_state);
     //cudaFree(isMAX);
-    double reward = cal_reward_cuda(state, next_state, TARGET_STATE);
-#if DEBUG
-    printf("action: %d, next_state: %d, reward: %f, max_q: %f\n", action, next_state, reward, max_q);
-#endif
-    q_table[state * ACTION_SIZE + action] = (1 - ALPHA) * cur_q + ALPHA * (reward + GAMMA * max_q);
-    //*state = next_state;
+    double local_reward = reward[mesh_id];
+
+    double surrounding_reward = 0;
+
+    int s_id = mesh_id - SIZE_X;
+    if (s_id > 0) {
+        surrounding_reward += reward[s_id];
+    }
+    s_id = mesh_id + SIZE_X;
+    if (s_id < MESH_SIZE) {
+        surrounding_reward += reward[s_id];
+    }
+    s_id = mesh_id - 1;
+    if (mesh_id % SIZE_X != 0) {
+        surrounding_reward += reward[s_id];
+    }
+    s_id = mesh_id + 1;
+    if (mesh_id % SIZE_X != SIZE_X - 1) {
+        surrounding_reward += reward[s_id];
+    }
+
+    double q_value = 0;
+    q_value += (1 - ALPHA) * cur_q;
+    q_value += ALPHA * local_reward + BETA * surrounding_reward;
+    q_value += ALPHA * next_q;
+    set_value_cuda(q_table, mesh_id, state_int, action, q_value);
 }
 
-__global__ void get_coverage_kernel(int* coverage, double* q_table) {
-    __shared__ int not_covered_count;
-    if (threadIdx.x == 0) {
-        not_covered_count = 0;
-    }
-    int state = threadIdx.x + blockIdx.x * blockDim.x;
-    if (state >= STATE_SIZE) {
-        return;
-    }
-    int main_offset = state * ACTION_SIZE;
-    bool covered_flag = false;
-    for (int i = 0; i < ACTION_SIZE; i++) {
-        if (get_value_cuda(q_table, state, i) != 0) {
-            covered_flag = true;
-            break;
+__device__ void generate_new_vehicel(int* environment, int mesh_id) {
+    if (mesh_id < SIZE_X) {
+        double rand_num = (double)rand() / RAND_MAX;
+        if (rand_num < VEHICLE_RATE) {
+            increase_in_vehicle(environment, mesh_id, 0);
         }
     }
-    if (!covered_flag) {
-        atomicAdd(&not_covered_count, 1);
+    if (mesh_id >= MESH_SIZE - SIZE_X) {
+        double rand_num = (double)rand() / RAND_MAX;
+        if (rand_num < VEHICLE_RATE) {
+            increase_in_vehicle(environment, mesh_id, 1);
+        }
     }
-    __syncthreads();
-    if (threadIdx.x == 0) {
-        coverage[blockIdx.x] = not_covered_count;
+    if (mesh_id % SIZE_X == 0) {
+        double rand_num = (double)rand() / RAND_MAX;
+        if (rand_num < VEHICLE_RATE) {
+            increase_in_vehicle(environment, mesh_id, 2);
+        }
+    }
+    if (mesh_id % SIZE_X == SIZE_X - 1) {
+        double rand_num = (double)rand() / RAND_MAX;
+        if (rand_num < VEHICLE_RATE) {
+            increase_in_vehicle(environment, mesh_id, 3);
+        }
     }
 }
+
+__device__ void take_next_step(int* environment, int mesh_id) {
+    for (int i = 0; i < LANE_SIZE; i++) {
+        set_env(environment, mesh_id, i, get_next_state(environment, mesh_id)[i]);
+    }
+    set_env(environment, mesh_id, 4, get_next_state_id(environment, mesh_id));
+}
+
+__global__ void update_env_after_kernel(int* environment, double* q_table) {
+    int mesh_id = threadIdx.x + blockIdx.x * blockDim.x;
+    if (mesh_id >= MESH_SIZE) {
+        return;
+    }
+    generate_new_vehicel(environment, mesh_id);
+    update_vehicle_in(environment, mesh_id);
+    take_next_step(environment, mesh_id);
+}
+
+// __global__ void get_coverage_kernel(int* coverage, double* q_table) {
+//     __shared__ int not_covered_count;
+//     if (threadIdx.x == 0) {
+//         not_covered_count = 0;
+//     }
+//     int state = threadIdx.x + blockIdx.x * blockDim.x;
+//     if (state >= STATE_SIZE) {
+//         return;
+//     }
+//     int main_offset = state * ACTION_SIZE;
+//     bool covered_flag = false;
+//     for (int i = 0; i < ACTION_SIZE; i++) {
+//         if (get_value_cuda(q_table,  state, i) != 0) {
+//             covered_flag = true;
+//             break;
+//         }
+//     }
+//     if (!covered_flag) {
+//         atomicAdd(&not_covered_count, 1);
+//     }
+//     __syncthreads();
+//     if (threadIdx.x == 0) {
+//         coverage[blockIdx.x] = not_covered_count;
+//     }
+// }
 
 
 class QTable {
@@ -1155,22 +1215,26 @@ void train() {
     dim3 env_grid(ENV_SIZE / env_block.x + 1);
     dim3 mesh_block(SIZE_X < BLOCK_SQUARE_SIZE ? SIZE_X : BLOCK_SQUARE_SIZE, SIZE_Y < BLOCK_SQUARE_SIZE ? SIZE_Y : BLOCK_SQUARE_SIZE);
     dim3 mesh_grid(SIZE_X / mesh_block.x + 1, SIZE_Y / mesh_block.y + 1);
+    dim3 q_block(SURROUNDING_SIZE < BLOCK_SIZE / ACTION_SIZE ? SURROUNDING_SIZE : BLOCK_SIZE / ACTION_SIZE, 2);
+    dim3 q_grid(SURROUNDING_SIZE / q_block.x + 1);
     while (train_step < NUM_TRAIN) {
         cout << "======================" << endl;
         cout << "start epoch: " << epoch_step << endl;
         reset_env_kernel<<<env_grid, env_block>>>(environment);
-        update_env_pre_kernel<<<mesh_grid, mesh_block>>>(environment, qtable)
+        update_env_pre_kernel<<<mesh_grid, mesh_block>>>(environment, qtable);
         update_reward_kernel<<<mesh_grid, mesh_block>>>(environment, reward);
-
-
-
+        for (int i = 0; i < MESH_SIZE; i++) {
+            cal_q_kernel_single<<<q_grid, q_block>>>(environment, qtable, reward, i);
+        }
+        update_env_after_kernel<<<mesh_grid, mesh_block>>>(environment, qtable);
     }
 }
 
 int main() {
-    IntersectionMesh mesh = IntersectionMesh();
-    mesh.train();
-    //mesh.print();
-    mesh.run();
+    // IntersectionMesh mesh = IntersectionMesh();
+    // mesh.train();
+    // //mesh.print();
+    // mesh.run();
+    train();
     return 0;
 }
