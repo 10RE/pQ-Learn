@@ -33,10 +33,10 @@ using namespace std;
 
 #define VERBOSE 0
 
-#define NUM_TRAIN 10
+#define NUM_TRAIN 700
 #define NUM_TEST 10000
 
-#define DEBUG 1
+#define DEBUG 0
 
 #define USE_CUDA 0
 
@@ -97,15 +97,15 @@ __device__ int get_next_state_id(int* env, int mesh_id) {
 // }
 
 __device__ int get_action(int* env, int mesh_id) {
-    return *(env + mesh_id * ENV_ITEM_SIZE + 8);
+    return *(env + mesh_id * ENV_ITEM_SIZE + 10);
 }
 
 __device__ int* get_in_vehicle(int* env, int mesh_id) {
-    return env + mesh_id * ENV_ITEM_SIZE + 9;
+    return env + mesh_id * ENV_ITEM_SIZE + 11;
 }
 
 __device__ void increase_in_vehicle(int* env, int mesh_id, int lane) {
-    *(env + mesh_id * ENV_ITEM_SIZE + 9 + lane) += 1;
+    *(env + mesh_id * ENV_ITEM_SIZE + 11 + lane) += 1;
 }
 
 __global__ void reset_env_kernel(int* env) {
@@ -227,14 +227,27 @@ __device__ int choose_action_cuda(int mesh_id, double* q_table, int* env, curand
 
 __device__ void cal_vehicle_out (int* environment, int mesh_id, int action) {
     if (action == 0) {
-        set_env(environment, mesh_id, 13, get_cur_state(environment, mesh_id)[0] > 0 ? 1 : 0);
-        set_env(environment, mesh_id, 14, get_cur_state(environment, mesh_id)[1] > 0 ? 1 : 0);
+        if (mesh_id - SIZE_X >= 0) {
+            //up out vehicle
+            set_env(environment, mesh_id - SIZE_X, 12, get_cur_state(environment, mesh_id)[1] > 0 ? 1 : 0);
+        }
+        if (mesh_id + SIZE_X < MESH_SIZE) {
+            //down out vehicle
+            set_env(environment, mesh_id + SIZE_X, 11, get_cur_state(environment, mesh_id)[0] > 0 ? 1 : 0);
+        }
     }
     else {
-        set_env(environment, mesh_id, 11, get_cur_state(environment, mesh_id)[2] > 0 ? 1 : 0);
-        set_env(environment, mesh_id, 12, get_cur_state(environment, mesh_id)[3] > 0 ? 1 : 0);
+        if (mesh_id % SIZE_X != 0) {
+            //left out vehicle
+            set_env(environment, mesh_id - 1, 14, get_cur_state(environment, mesh_id)[3] > 0 ? 1 : 0);
+        }
+        if (mesh_id % SIZE_X != SIZE_X - 1) {
+            //down out vehicle
+            set_env(environment, mesh_id + 1, 11, get_cur_state(environment, mesh_id)[2] > 0 ? 1 : 0);
+        }
     }
     #if DEBUG
+        __syncthreads();
         printf("out_vehicle: %d, %d, %d, %d, %d\n", mesh_id, get_in_vehicle(environment, mesh_id)[0], get_in_vehicle(environment, mesh_id)[1], get_in_vehicle(environment, mesh_id)[2], get_in_vehicle(environment, mesh_id)[3]);
     #endif
 }
@@ -256,8 +269,8 @@ __device__ void update_vehicle_in_with_out (int* environment, int mesh_id, int a
 
 __device__ void update_vehicle_in (int* environment, int mesh_id) {
     for (int i = 0; i < LANE_SIZE; i++) {
-        set_env(environment, mesh_id, 5 + i, get_cur_state(environment, mesh_id)[i] + get_in_vehicle(environment, mesh_id)[i]);
-        set_env(environment, mesh_id, 11 + i, 0);
+        set_env(environment, mesh_id, 5 + i, get_next_state(environment, mesh_id)[i] + get_in_vehicle(environment, mesh_id)[i]);
+        //set_env(environment, mesh_id, 11 + i, 0);
     }
     #if DEBUG
         printf("in_vehicle: %d, %d, %d, %d, %d\n", mesh_id, get_in_vehicle(environment, mesh_id)[0], get_in_vehicle(environment, mesh_id)[1], get_in_vehicle(environment, mesh_id)[2], get_in_vehicle(environment, mesh_id)[3]);
@@ -287,8 +300,10 @@ __global__ void update_env_pre_kernel(int* environment, double* q_table, curandS
     #endif
     reset_vehicle_in(environment, id);
     set_next_state_id(environment, id, next_state_id);
+    __syncthreads();
     cal_vehicle_out(environment, id, action);
-    update_vehicle_in_with_out(environment, id, action);
+    __syncthreads();
+    //update_vehicle_in_with_out(environment, id, action);
 }
 
 __global__ void update_reward_kernel(int* environment, double* reward) {
@@ -435,9 +450,11 @@ __global__ void is_end_state_kernel(int* environment, bool* is_end) {
     for (int i = 0; i < LANE_SIZE; i++) {
         if (state[i] > MAX_VEHICLE_NUM) {
             *is_end = true;
+            printf("Is end state: %d\n", mesh_id);
             return;
         }
     }
+    printf("Is not end state: %d\n", mesh_id);
     return;
 }
 
@@ -569,20 +586,21 @@ void train() {
                 cal_q_kernel_single<<<q_grid, q_block>>>(environment, qtable, reward, i);
             }
             update_env_after_kernel<<<mesh_grid, mesh_block>>>(environment, qtable, rand_states);
+            cudaDeviceSynchronize();
             train_step ++;
         }
         epoch_step ++;
     }
 
-    double* qtable_cpu = (double*)malloc(sizeof(double) * MESH_SIZE * q_table_size);
-    if (cudaMemcpy(
-        qtable_cpu, 
-        qtable, 
-        sizeof(double) * MESH_SIZE * q_table_size,
-        cudaMemcpyDeviceToHost
-    ) != cudaSuccess){
-        cout << "Could not copy to CPU" << endl;
-    }
+    // double* qtable_cpu = (double*)malloc(sizeof(double) * MESH_SIZE * q_table_size);
+    // if (cudaMemcpy(
+    //     qtable_cpu, 
+    //     qtable, 
+    //     sizeof(double) * MESH_SIZE * q_table_size,
+    //     cudaMemcpyDeviceToHost
+    // ) != cudaSuccess){
+    //     cout << "Could not copy to CPU" << endl;
+    // }
     // for (int i = 0; i < MESH_SIZE; i++) {
     //     cout << "mesh: " << i << endl;
     //     for (int j = 0; j < state_size; j++) {
