@@ -29,12 +29,12 @@ using namespace std;
 #define ALPHA 0.5
 #define BETA 0.1 //decay reward from surroundings
 #define GAMMA 0.5
-#define EPSILON 0.4
+#define EPSILON 0.6
 #define VEHICLE_RATE 0.3
 
 #define VERBOSE 0
 
-#define NUM_TRAIN 30000
+#define NUM_TRAIN 50000
 #define NUM_TEST 10000
 
 #define DEBUG 0
@@ -437,13 +437,13 @@ __global__ void cal_q_kernel_single(int* environment, double* reward, double* q_
     int id = threadIdx.x + blockIdx.x * blockDim.x;
     int action = threadIdx.y;
     int surrounding_id = id % SURROUNDING_SIZE;
-    // if (surrounding_id != 0) {
-    //     return;
-    // }
+    if (surrounding_id != 0) {
+        return;
+    }
     int mesh_id = id / SURROUNDING_SIZE;
-    // if (action != get_action(environment, mesh_id)) {
-    //     return;
-    // }
+    if (action != get_action(environment, mesh_id)) {
+        return;
+    }
     if (id >= Q_KERNEL_SIZE) {
         return;
     }
