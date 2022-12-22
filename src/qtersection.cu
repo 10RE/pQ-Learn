@@ -34,12 +34,12 @@ using namespace std;
 
 #define VERBOSE 0
 
-#define NUM_TRAIN 100
-#define NUM_TEST 1
+#define NUM_TRAIN 30000
+#define NUM_TEST 10000
 
-#define DEBUG 1
+#define DEBUG 0
 
-#define SHOW_STATE 1
+#define SHOW_STATE 0
 
 #define USE_CUDA 0
 
@@ -83,6 +83,10 @@ __device__ int get_cur_state_id(int* env, int mesh_id) {
     return *(env + mesh_id * ENV_ITEM_SIZE + 4);
 }
 
+__device__ void set_cur_state_id(int* env, int mesh_id, int cur_state_id) {
+    *(env + mesh_id * ENV_ITEM_SIZE + 4) = cur_state_id;
+}
+
 __device__ int* get_next_state(int* env, int mesh_id) {
     return env + mesh_id * ENV_ITEM_SIZE + 5;
 }
@@ -101,6 +105,10 @@ __device__ int get_next_state_id(int* env, int mesh_id) {
 
 __device__ int get_action(int* env, int mesh_id) {
     return *(env + mesh_id * ENV_ITEM_SIZE + 10);
+}
+
+__device__ void set_action(int* env, int mesh_id, int action) {
+    *(env + mesh_id * ENV_ITEM_SIZE + 10) = action;
 }
 
 __device__ int* get_in_vehicle(int* env, int mesh_id) {
@@ -141,11 +149,11 @@ __device__ int get_next_state_cuda(int* next_state, int* state, int action){
 }
 
 __device__ double get_value_cuda(double* q_table, int id, int state, int action){
-    return q_table[(state * ACTION_SIZE + action) + Q_TABLE_SIZE * id];
+    return q_table[Q_TABLE_SIZE * id + state * ACTION_SIZE + action];
 }
 
 __device__ void set_value_cuda(double* q_table, int id, int state, int action, double value){
-    q_table[(state * ACTION_SIZE + action) + Q_TABLE_SIZE * id] = value;
+    q_table[Q_TABLE_SIZE * id + state * ACTION_SIZE + action] = value;
 }
 
 // __global__ void get_max_q_value_in_action(double* max_q, double* isMAX, double* q_table, int state) {
@@ -199,8 +207,13 @@ __device__ double cal_reward_cuda(int* next_state, int* state, int* in_vehicle) 
 
 __device__ int choose_max_action_cuda(int mesh_id, double* q_table, int* env) {//, double* max_q) {
     int state_id = get_cur_state_id(env, mesh_id);
-    double max_q = DBL_MIN;
+    double max_q = -999;
     int action_id = 0;
+    #if DEBUG
+        double value0 = get_value_cuda(q_table, mesh_id, state_id, 0);
+        double value1 = get_value_cuda(q_table, mesh_id, state_id, 1);
+    #endif
+
     for (int i = 0; i < ACTION_SIZE; i++) {
         double value = get_value_cuda(q_table, mesh_id, state_id, i);
         
@@ -210,7 +223,7 @@ __device__ int choose_max_action_cuda(int mesh_id, double* q_table, int* env) {/
         }
     }
     #if DEBUG
-    printf("max_action %d: %f\n", mesh_id, max_q);
+    printf("max_action %d, %d, %d: %f, %f\n", mesh_id, action_id, state_id, value0, value1);
     #endif
     //printf("max_value: %f\n", max_q);
     return action_id;
@@ -297,9 +310,14 @@ __global__ void update_env_pre_kernel(int* environment, double* q_table, curandS
     if (id >= MESH_SIZE) {
         return;
     }
-    int action = choose_action_cuda(id, q_table, environment, rand_state);
-    
     int* state = get_cur_state(environment, id);
+    int cur_state_id = get_state(state);
+    set_cur_state_id(environment, id, cur_state_id);
+
+    int action = choose_action_cuda(id, q_table, environment, rand_state);
+
+    set_action(environment, id, action);
+    
     int next_state_id = get_next_state_cuda(get_next_state(environment, id), state, action);  // update next state, get next state id
     #if SHOW_STATE
         printf("env_prev: %d, action: %d, cur_state: %d, %d, %d, %d, next_state: %d, %d, %d, %d \n", id, action, state[0], state[1], state[2], state[3], get_next_state(environment, id)[0], get_next_state(environment, id)[1], get_next_state(environment, id)[2], get_next_state(environment, id)[3]);
@@ -317,12 +335,17 @@ __global__ void update_env_pre_run_kernel(int* environment, double* q_table, cur
     if (id >= MESH_SIZE) {
         return;
     }
+    int* state = get_cur_state(environment, id);
+    int cur_state_id = get_state(state);
+    set_cur_state_id(environment, id, cur_state_id);
+
     int action = choose_max_action_cuda(id, q_table, environment);
     
-    int* state = get_cur_state(environment, id);
+    set_action(environment, id, action);
+
     int next_state_id = get_next_state_cuda(get_next_state(environment, id), state, action);  // update next state, get next state id
     if (show_state) {
-        printf("env_prev: %d, action: %d, cur_state: %d, %d, %d, %d, next_state: %d, %d, %d, %d \n", id, action, state[0], state[1], state[2], state[3], get_next_state(environment, id)[0], get_next_state(environment, id)[1], get_next_state(environment, id)[2], get_next_state(environment, id)[3]);
+        printf("env_prev: %d, action: %d, cur_state: %d, %d, %d, %d, next_state: %d, %d, %d, %d, q_0: %f, q_1: %f \n", id, action, state[0], state[1], state[2], state[3], get_next_state(environment, id)[0], get_next_state(environment, id)[1], get_next_state(environment, id)[2], get_next_state(environment, id)[3], get_value_cuda(q_table, id, get_cur_state_id(environment, id), 0), get_value_cuda(q_table, id, get_cur_state_id(environment, id), 1));
     }
     reset_vehicle_in(environment, id);
     set_next_state_id(environment, id, next_state_id);
@@ -334,16 +357,21 @@ __global__ void update_env_pre_run_kernel(int* environment, double* q_table, cur
 
 __global__ void update_reward_kernel(int* environment, double* reward) {
     int x = threadIdx.x + blockIdx.x * blockDim.x;
-    int y = threadIdx.y + blockIdx.y * blockDim.y;
-    int mesh_id = x + y * blockDim.x * gridDim.x;
+    int mesh_id = x;
     if (mesh_id >= MESH_SIZE) {
         return;
     }
 
     int max_next_lane_num = 0;
     int next_lane_sum = 0;
+    int* next_state = get_next_state(environment, mesh_id);
+    // if (action_id == get_action(environment, mesh_id)) {
+    //     next_state = get_next_state(environment, mesh_id);
+    // } else {
+    //     next_state = ;
+    // }
     for (int i = 0; i < LANE_SIZE; i++){
-        int* next_state = get_next_state(environment, mesh_id);
+        
         next_lane_sum += next_state[i];
         if (next_state[i] > max_next_lane_num) {
             max_next_lane_num = next_state[i];
@@ -351,8 +379,8 @@ __global__ void update_reward_kernel(int* environment, double* reward) {
     }
     int max_cur_lane_num = 0;
     int cur_lane_sum = 0;
+    int* cur_state = get_cur_state(environment, mesh_id);
     for (int i = 0; i < LANE_SIZE; i++){
-        int* cur_state = get_cur_state(environment, mesh_id);
         cur_lane_sum += cur_state[i];
         if (cur_state[i] > max_cur_lane_num) {
             max_cur_lane_num = cur_state[i];
@@ -370,6 +398,31 @@ __global__ void update_reward_kernel(int* environment, double* reward) {
     #endif
 }
 
+__device__ double cal_reward(int* environment, int mesh_id, int* cur_state, int* next_state) {
+    int max_next_lane_num = 0;
+    int next_lane_sum = 0;
+    for (int i = 0; i < LANE_SIZE; i++){
+        next_lane_sum += next_state[i];
+        if (next_state[i] > max_next_lane_num) {
+            max_next_lane_num = next_state[i];
+        }
+    }
+    int max_cur_lane_num = 0;
+    int cur_lane_sum = 0;
+    for (int i = 0; i < LANE_SIZE; i++){
+        cur_lane_sum += cur_state[i];
+        if (cur_state[i] > max_cur_lane_num) {
+            max_cur_lane_num = cur_state[i];
+        }
+    }
+
+    double in_vehicle_num = 0;
+    for (int i = 0; i < LANE_SIZE; i++){
+        in_vehicle_num += get_in_vehicle(environment, mesh_id)[i];
+    }
+    return max_cur_lane_num * max_cur_lane_num - max_next_lane_num * max_next_lane_num - in_vehicle_num * 0.025;
+}
+
 __global__ void debug_reward_kernel(double* reward) {
     int x = threadIdx.x + blockIdx.x * blockDim.x;
     int y = threadIdx.y + blockIdx.y * blockDim.y;
@@ -384,16 +437,20 @@ __global__ void cal_q_kernel_single(int* environment, double* reward, double* q_
     int id = threadIdx.x + blockIdx.x * blockDim.x;
     int action = threadIdx.y;
     int surrounding_id = id % SURROUNDING_SIZE;
-    if (surrounding_id != 0) {
-        return;
-    }
+    // if (surrounding_id != 0) {
+    //     return;
+    // }
+    int mesh_id = id / SURROUNDING_SIZE;
+    // if (action != get_action(environment, mesh_id)) {
+    //     return;
+    // }
     if (id >= Q_KERNEL_SIZE) {
         return;
     }
     if (action >= ACTION_SIZE) {
         return;
     }
-    int mesh_id = id / SURROUNDING_SIZE;
+    
     
     int* state = get_cur_state(environment, mesh_id);
     int* actual_state = new int[LANE_SIZE];
@@ -417,6 +474,8 @@ __global__ void cal_q_kernel_single(int* environment, double* reward, double* q_
     double cur_q = get_value_cuda(q_table, mesh_id, state_int, action);
     int next_state_int = get_next_state_cuda(next_state, actual_state, action);
 
+    double local_reward = cal_reward(environment, mesh_id, actual_state, next_state);
+
     delete[] actual_state;
     delete[] next_state;
 
@@ -425,8 +484,8 @@ __global__ void cal_q_kernel_single(int* environment, double* reward, double* q_
 
     //get_max_q_value_in_action<<<ACTION_SIZE, ACTION_SIZE>>>(&max_q, isMAX, q_table, next_state);
     //cudaFree(isMAX);
-    double local_reward = reward[mesh_id];
-
+    //double local_reward = reward[mesh_id];
+    
     double surrounding_reward = 0;
 
     int s_id = mesh_id - SIZE_X;
@@ -450,11 +509,12 @@ __global__ void cal_q_kernel_single(int* environment, double* reward, double* q_
     q_value += (1 - ALPHA) * cur_q;
     q_value += ALPHA * local_reward + BETA * surrounding_reward;
     q_value += ALPHA * next_q;
-    #if DEBUG
-    printf("q_value state %d: %d, %d, %d, %d: %f, %f\n", mesh_id, actual_state[0], actual_state[1], actual_state[2], actual_state[3], reward[mesh_id], q_value);
-    #endif
     __syncthreads();
     set_value_cuda(q_table, mesh_id, state_int, action, q_value);
+    #if DEBUG
+    printf("q_value state %d: %d, %d, %d, %d, %d: %f, q_val_0: %f, q_val_1: %f\n", mesh_id, state_int, actual_state[0], actual_state[1], actual_state[2], actual_state[3], reward[mesh_id], get_value_cuda(q_table, mesh_id, state_int, 0), get_value_cuda(q_table, mesh_id, state_int, 1));
+    #endif
+   
 }
 
 __device__ void generate_new_vehicel(int* environment, int mesh_id, curandState* rand_state) {
@@ -488,7 +548,7 @@ __device__ void take_next_step(int* environment, int mesh_id) {
     for (int i = 0; i < LANE_SIZE; i++) {
         set_env(environment, mesh_id, i, get_next_state(environment, mesh_id)[i]);
     }
-    set_env(environment, mesh_id, 4, get_next_state_id(environment, mesh_id));
+    //set_env(environment, mesh_id, 4, get_next_state_id(environment, mesh_id));
 }
 
 __global__ void update_env_after_kernel(int* environment, double* q_table, curandState* rand_state) {
@@ -582,7 +642,7 @@ void train(double* qtable) {
         cout << "env malloc failed" << endl;
     }
     double* reward;
-    if (cudaMalloc(&reward, sizeof(double) * MESH_SIZE) != cudaSuccess) {
+    if (cudaMalloc(&reward, sizeof(double) * MESH_SIZE * ACTION_SIZE) != cudaSuccess) {
         cout << "reward malloc failed" << endl;
     }
     bool* is_end_state_cuda;
@@ -595,6 +655,8 @@ void train(double* qtable) {
     dim3 env_grid(ENV_SIZE / env_block.x + 1);
     dim3 mesh_block(MESH_SIZE < BLOCK_SQUARE_SIZE ? MESH_SIZE : BLOCK_SQUARE_SIZE);
     dim3 mesh_grid(MESH_SIZE / mesh_block.x + 1);
+    dim3 reward_block(MESH_SIZE < BLOCK_SIZE ? MESH_SIZE : BLOCK_SIZE);
+    dim3 reward_grid(MESH_SIZE / mesh_block.x + 1);
     dim3 q_block(Q_KERNEL_SIZE < BLOCK_SIZE / ACTION_SIZE ? Q_KERNEL_SIZE : BLOCK_SIZE / ACTION_SIZE, ACTION_SIZE);
     dim3 q_grid(Q_KERNEL_SIZE / q_block.x + 1);
     while (train_step < NUM_TRAIN) {
@@ -639,7 +701,7 @@ void train(double* qtable) {
             cout << "----------------------" << endl;
             cout << "train step: " << train_step << endl;
             update_env_pre_kernel<<<mesh_grid, mesh_block>>>(environment, qtable, rand_states);
-            update_reward_kernel<<<mesh_grid, mesh_block>>>(environment, reward);
+            update_reward_kernel<<<reward_grid, reward_block>>>(environment, reward);
             cudaDeviceSynchronize();
             //debug_reward_kernel<<<mesh_grid, mesh_block>>>(reward);
             cal_q_kernel_single<<<q_grid, q_block>>>(environment, reward, qtable);
@@ -702,11 +764,11 @@ void run(double* qtable) {
         cout << "is_end_state malloc failed" << endl;
     }
     int* environment_cpu = (int*)malloc(sizeof(int) * ENV_SIZE);
-    dim3 env_block(ENV_SIZE < BLOCK_SIZE ? (ENV_SIZE > 32 ? ENV_SIZE : 32) : BLOCK_SIZE);
+    dim3 env_block(ENV_SIZE < BLOCK_SIZE ? (ENV_SIZE > BLOCK_SQUARE_SIZE ? ENV_SIZE : BLOCK_SQUARE_SIZE) : BLOCK_SIZE);
     dim3 env_grid(ENV_SIZE / env_block.x + 1);
-    dim3 mesh_block(MESH_SIZE < BLOCK_SQUARE_SIZE ? MESH_SIZE : BLOCK_SQUARE_SIZE);
+    dim3 mesh_block(MESH_SIZE < BLOCK_SIZE ? MESH_SIZE : BLOCK_SIZE);
     dim3 mesh_grid(MESH_SIZE / mesh_block.x + 1);
-    dim3 q_block(SURROUNDING_SIZE < BLOCK_SIZE / ACTION_SIZE ? SURROUNDING_SIZE : BLOCK_SIZE / ACTION_SIZE, 2);
+    dim3 q_block(SURROUNDING_SIZE < BLOCK_SIZE / ACTION_SIZE ? SURROUNDING_SIZE : BLOCK_SIZE / ACTION_SIZE, ACTION_SIZE);
     dim3 q_grid(SURROUNDING_SIZE / q_block.x + 1);
     reset_env_kernel<<<env_grid, env_block>>>(environment);
     reset_is_end_state_kernel<<<1, 1>>>(is_end_state_cuda);
