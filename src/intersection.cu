@@ -14,7 +14,7 @@ using namespace std;
 
 #define ALPHA 0.5
 #define BETA 0.1 //decay reward from surroundings
-#define GAMMA 0.5
+#define GAMMA 0.1
 #define EPSILON 0.4
 #define VEHICLE_RATE 0.3
 
