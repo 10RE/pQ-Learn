@@ -491,6 +491,7 @@ public:
     double epsilon;
     double alpha;
     double beta;
+    double gamma;
 
     double vehicle_rate;
 
@@ -507,6 +508,7 @@ public:
         this -> epsilon = EPSILON;
         this -> alpha = ALPHA;
         this -> beta = BETA;
+        this -> gamma = GAMMA;
 
         this -> vehicle_rate = VEHICLE_RATE;
 
@@ -655,7 +657,7 @@ public:
             double q_value = 0;
             q_value += (1 - this->alpha) * this -> mesh[i].get_cur_q_value();
             q_value += this -> alpha * (reward[i]) + this -> beta * surrounding_reward;
-            q_value += this -> alpha * this -> mesh[i].get_next_q_value();
+            q_value += this -> alpha * this -> gamma * this -> mesh[i].get_next_q_value();
             #if DEBUG
                 cout << "update q value - intersection: " << i << " reward: " << reward[i] << " surrounding: " << surrounding_reward << " q value: " << q_value << endl;
             #endif

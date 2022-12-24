@@ -28,14 +28,16 @@ using namespace std;
 
 #define ALPHA 0.5
 #define BETA 0.1 //decay reward from surroundings
-#define GAMMA 0.5
-#define EPSILON 0.6
+#define GAMMA 0.1
+#define EPSILON 0.2
 #define VEHICLE_RATE 0.3
 
 #define VERBOSE 0
 
-#define NUM_TRAIN 50000
-#define NUM_TEST 10000
+#define NUM_TRAIN 10000
+#define NUM_TEST 1000
+
+#define NO_SURROUNDING 0
 
 #define DEBUG 0
 
@@ -169,7 +171,7 @@ __device__ void set_value_cuda(double* q_table, int id, int state, int action, d
 // }
 
 __device__ double get_max_q_value_in_action_cuda(double* q_table, int id, int state) {
-    double max_q = DBL_MIN;
+    double max_q = -999;
     for (int i = 0; i < ACTION_SIZE; i++) {
         double value = get_value_cuda(q_table, id, state, i);
         
@@ -391,8 +393,8 @@ __global__ void update_reward_kernel(int* environment, double* reward) {
     for (int i = 0; i < LANE_SIZE; i++){
         in_vehicle_num += get_in_vehicle(environment, mesh_id)[i];
     }
-    //reward[mesh_id] = 0.25 * (cur_lane_sum - next_lane_sum) + max_cur_lane_num * max_cur_lane_num - max_next_lane_num * max_next_lane_num - in_vehicle_num * 0.025;
-    reward[mesh_id] = max_cur_lane_num * max_cur_lane_num - max_next_lane_num * max_next_lane_num - in_vehicle_num * 0.025;
+    reward[mesh_id] = 0.25 * (cur_lane_sum - next_lane_sum) + max_cur_lane_num * max_cur_lane_num - max_next_lane_num * max_next_lane_num - in_vehicle_num * 0.025;
+    //reward[mesh_id] = max_cur_lane_num * max_cur_lane_num - max_next_lane_num * max_next_lane_num - in_vehicle_num * 0.025;
     #if DEBUG
         printf("reward: %d, %f\n", mesh_id, reward[mesh_id]);
     #endif
@@ -420,7 +422,7 @@ __device__ double cal_reward(int* environment, int mesh_id, int* cur_state, int*
     for (int i = 0; i < LANE_SIZE; i++){
         in_vehicle_num += get_in_vehicle(environment, mesh_id)[i];
     }
-    return max_cur_lane_num * max_cur_lane_num - max_next_lane_num * max_next_lane_num - in_vehicle_num * 0.025;
+    return 0.25 * (cur_lane_sum - next_lane_sum) + max_cur_lane_num * max_cur_lane_num - max_next_lane_num * max_next_lane_num - in_vehicle_num * 0.025;
 }
 
 __global__ void debug_reward_kernel(double* reward) {
@@ -436,14 +438,19 @@ __global__ void debug_reward_kernel(double* reward) {
 __global__ void cal_q_kernel_single(int* environment, double* reward, double* q_table) {
     int id = threadIdx.x + blockIdx.x * blockDim.x;
     int action = threadIdx.y;
+
     int surrounding_id = id % SURROUNDING_SIZE;
+    #if NO_SURROUNDING
     if (surrounding_id != 0) {
         return;
     }
+    #endif
     int mesh_id = id / SURROUNDING_SIZE;
+    #if NO_SURROUNDING 
     if (action != get_action(environment, mesh_id)) {
         return;
     }
+    #endif
     if (id >= Q_KERNEL_SIZE) {
         return;
     }
@@ -455,16 +462,28 @@ __global__ void cal_q_kernel_single(int* environment, double* reward, double* q_
     int* state = get_cur_state(environment, mesh_id);
     int* actual_state = new int[LANE_SIZE];
     int* next_state = new int[LANE_SIZE];
-    for (int i = 0; i < LANE_SIZE; i++){
-        if ((surrounding_id - 2) / 2 == i) {
-            int tmp_state = state[i] + (surrounding_id % 2 == 0 ? 1 : -1);
-            actual_state[i] = tmp_state > 0 ? (tmp_state < MAX_VEHICLE_NUM ? tmp_state : MAX_VEHICLE_NUM) : 0;
-        }
-        else {
+    if (surrounding_id == 0) {
+        for (int i = 0; i < LANE_SIZE; i++){
             actual_state[i] = (int)state[i];
         }
     }
-
+    else {
+        for (int i = 0; i < LANE_SIZE; i++){
+            if ((surrounding_id - 1) / 2 == i) {
+                int tmp_state = state[i] + (surrounding_id % 2 == 0 ? 1 : -1);
+                if (tmp_state < 0 || tmp_state > MAX_VEHICLE_NUM) {
+                    delete[] actual_state;
+                    delete[] next_state;
+                    return;
+                }
+                actual_state[i] = tmp_state > 0 ? (tmp_state < MAX_VEHICLE_NUM ? tmp_state : MAX_VEHICLE_NUM) : 0;
+            }
+            else {
+                actual_state[i] = (int)state[i];
+            }
+        }
+    }
+    
     int state_int = get_state(actual_state);
     
     // double* isMAX;
@@ -476,8 +495,7 @@ __global__ void cal_q_kernel_single(int* environment, double* reward, double* q_
 
     double local_reward = cal_reward(environment, mesh_id, actual_state, next_state);
 
-    delete[] actual_state;
-    delete[] next_state;
+    
 
     double next_q = 0;
     next_q = get_max_q_value_in_action_cuda(q_table, mesh_id, next_state_int);
@@ -508,13 +526,17 @@ __global__ void cal_q_kernel_single(int* environment, double* reward, double* q_
     double q_value = 0;
     q_value += (1 - ALPHA) * cur_q;
     q_value += ALPHA * local_reward + BETA * surrounding_reward;
-    q_value += ALPHA * next_q;
+    q_value += ALPHA * GAMMA * next_q;
     __syncthreads();
     set_value_cuda(q_table, mesh_id, state_int, action, q_value);
+
     #if DEBUG
-    printf("q_value state %d: %d, %d, %d, %d, %d: %f, q_val_0: %f, q_val_1: %f\n", mesh_id, state_int, actual_state[0], actual_state[1], actual_state[2], actual_state[3], reward[mesh_id], get_value_cuda(q_table, mesh_id, state_int, 0), get_value_cuda(q_table, mesh_id, state_int, 1));
+    __syncthreads();
+    printf("q_value %d state: %d, %d, %d, %d, %d, action: %d, next_state: %d, %d, %d, %d, q_val: %f, reward: %f, surrounding: %f, q_val_0: %f, q_val_1: %f\n", mesh_id, state_int, actual_state[0], actual_state[1], actual_state[2], actual_state[3], action, next_state[0], next_state[1], next_state[2], next_state[3], next_q, local_reward, surrounding_reward, get_value_cuda(q_table, mesh_id, state_int, 0), get_value_cuda(q_table, mesh_id, state_int, 1));
     #endif
    
+    delete[] actual_state;
+    delete[] next_state;
 }
 
 __device__ void generate_new_vehicel(int* environment, int mesh_id, curandState* rand_state) {
