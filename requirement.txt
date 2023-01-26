@@ -1,0 +1,22 @@
+* Submit it as a paper copy, either in my mailbox in the mail room or by slipping it under my office door, 3605 BBB. If instead you encounter me you can just hand it to me.
+
+* I originally was going to have it due by midnight next Thursday, but since I won't be able to start reading them until Friday night you can turn it in by 5pm Friday, December 9.
+
+
+Format and Contents:
+
+* Remember that the focus of this project is on doing non-trivial parallelization, not easy parallelization of a hard problem. You're being graded on the parallelization effort, not on the underlying application. For a few of you your project involves careful analyses of a new way to parallelize something, and might even involve an algorithm for a theoretical computer (such as a PRAM or cellular automata).
+
+* Typically the papers are about 10 pages, but that is only a guide, not a requirement. Some papers are longer because they include more figures or tables. You need to first explain what it is you are working on, why the parallelization is complicated, then how you developed your parallel program, then an analysis of the results. I don't need a detailed explanation of the problem, e.g., don't include a long explanation of why the answer involves a specific differential equation, though you might need to explain why the equation makes the parallelization difficult. You should think of the explanation as something you would give to another person in this class who isn't in your field.
+
+For the explanation of how you developed your program often you need to explain what you tried that didn't work, as well as what the final approach is (perhaps you are lucky and everything worked out exactly as you expected). You should explain some of the analyses you did - for example, for an MPI program you might have analyzed how fast it was using blocking vs. nonblocking communication, as well as analyzing other alternatives. For most programs I want you to analyze the time and efficiency of various components, not just the overall program, though in some cases that might not make sense. I also want to see some reason to believe your answers are correct. E.g., you might have a serial code that solves the same problem, so you can compare answers, or compare to published values. For some cases that might not be possible but, say, output diagrams may explain why the solutions are correct.
+
+I want to see tables or graphs of time and efficiency (you can include speedup if you want and/or when efficiency doesn't make sense, such as a GPU version vs. a shared memory one). I want you to show how they changed as a function of input size and number of cores. For GPUs it is just a function of input size (though a few people are using more than 1 GPU, in which case the number of GPUs is a relevant parameter). For some problems I want you to try some inputs which have important variations, such as a class of graphs where most vertices are have many neighbors versus a class where most vertices have few. For many of you we've already discussed this and I told you to come back and discuss the variations.
+
+* If you want you might want to include some brief statements about what would be interesting to explore next.
+
+* Include relevant references, especially if your work is based on approaches mentioned in the literature.
+
+* You can draw figures by hand, as long as they are clearly readable. 
+
+* Don't turn in your code unless I ask you to.
