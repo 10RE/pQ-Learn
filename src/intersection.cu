@@ -22,7 +22,7 @@ using namespace std;
 
 #define VERBOSE 0
 
-#define NUM_TRAIN 100000
+#define NUM_TRAIN 50000
 #define NUM_TEST 10000
 #define NUM_TEST_ITER 20
 
