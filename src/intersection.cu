@@ -2,11 +2,13 @@
 #include "math.h"
 #include <map>
 #include <float.h>
+#include <time.h>
+#include <chrono>
 
 using namespace std;
 
-#define SIZE_X 2
-#define SIZE_Y 2
+#define SIZE_X 8
+#define SIZE_Y 8
 #define ACTION_SIZE 2
 #define MAX_VEHICLE_NUM 8
 
@@ -20,8 +22,9 @@ using namespace std;
 
 #define VERBOSE 0
 
-#define NUM_TRAIN 30000
+#define NUM_TRAIN 100000
 #define NUM_TEST 10000
+#define NUM_TEST_ITER 20
 
 #define DEBUG 0
 
@@ -102,6 +105,19 @@ public:
             ) != cudaSuccess){
             cout << "Could not copy to CPU" << endl;
         }
+    }
+
+    float get_coverage() {
+        int covered = 0;
+        for (int i = 0; i < this -> table_size; i += this -> action_size){
+            for (int j = 0; j < this -> action_size; j++){
+                if (this -> q_table[i + j] - 0.0 > 0.00001){
+                    covered ++;
+                    break;
+                }
+            }
+        }
+        return covered / (float)this -> state_size;
     }
 
     void print_table_max() {
@@ -516,6 +532,23 @@ public:
 
     }
 
+    IntersectionMesh(int num_train) {
+        this -> size_x = SIZE_X;
+        this -> size_y = SIZE_Y;
+        this -> mesh_size = this -> size_x * this -> size_y;
+        this -> mesh = new Intersection[this -> size_x * this -> size_y];
+
+        this -> epsilon = EPSILON;
+        this -> alpha = ALPHA;
+        this -> beta = BETA;
+        this -> gamma = GAMMA;
+
+        this -> vehicle_rate = VEHICLE_RATE;
+
+        this -> num_train = num_train;
+
+    }
+
     void reset() {
         for (int i = 0; i < this -> mesh_size; i++) {
 #if DEBUG
@@ -716,20 +749,28 @@ public:
         }
     }
 
+    float get_coverage() {
+        float coverage = 0;
+        for (int i = 0; i < this -> mesh_size; i++) {
+            coverage += this -> mesh[i].q_table.get_coverage();
+        }
+        return coverage / this -> mesh_size;
+    }
+
     void train() {
         int train_step = 0;
         int epoch_step = 0;
-        cout << train_step << endl;
+        //cout << train_step << endl;
         while (train_step < this->num_train) {
-            cout << "======================" << endl;
-            cout << "start epoch: " << epoch_step << endl;
+            //cout << "======================" << endl;
+            //cout << "start epoch: " << epoch_step << endl;
             this -> reset();
             while (!this -> is_end_state()) {
                 if (train_step > this->num_train) {
                     break;
                 }
-                cout << "----------------------" << endl;
-                cout << "train step: " << train_step << endl;
+                //cout << "----------------------" << endl;
+                //cout << "train step: " << train_step << endl;
                 #if DEBUG
                     for (int i = 0; i < this -> mesh_size; i++) {
                         cout << "train - intersection: " << i << " cur_state: " << this -> mesh[i].cur_state_int << endl;
@@ -758,12 +799,12 @@ public:
         }
     }
 
-    void run() {
+    int run() {
         int train_step = 0;
         this -> reset();
         while (!this -> is_end_state()) {
             if (train_step > NUM_TEST) {
-                cout << "Run succeed" << endl;
+                //cout << "Run succeed" << endl;
                 break;
             }
 
@@ -773,10 +814,10 @@ public:
                 }
             #endif
 
-            cout << "step: " << train_step << endl;
-            for (int i = 0; i < this -> mesh_size; i++) {
-                this -> mesh[i].print_status();
-            }
+            //cout << "step: " << train_step << endl;
+            // for (int i = 0; i < this -> mesh_size; i++) {
+            //     this -> mesh[i].print_status();
+            // }
 
             this -> choose_max_action();
             this -> get_next_state();
@@ -790,14 +831,55 @@ public:
 
             train_step ++;
         }
-        cout << "Steps: " << train_step << endl;
+        //cout << "Steps: " << train_step << endl;
+        return train_step;
     }
 };
 
 int main() {
-    IntersectionMesh mesh = IntersectionMesh();
-    mesh.train();
-    //mesh.print();
-    mesh.run();
+    int test_size_array[9] = {1000, 5000, 10000, 20000, 50000, 100000, 200000, 500000, 1000000};
+    for (int i = 5; i < 9; i++) {
+        int num_train = test_size_array[i];
+        cout << endl;
+        cout << "NUM_TRAIN: " << num_train << endl;
+        IntersectionMesh mesh = IntersectionMesh(num_train);
+        chrono::steady_clock::time_point start = chrono::steady_clock::now();
+        mesh.train();
+        chrono::steady_clock::time_point end = chrono::steady_clock::now();
+        cout << "Time: " << chrono::duration_cast<std::chrono::microseconds>(end - start).count() << endl;
+        cout << "Coverage: " << mesh.get_coverage() << endl;
+        //mesh.print();
+        int avg_train = 0;
+        int success_count = 0;
+        for (int i = 0; i < NUM_TEST_ITER; i++) {
+            int run_step = mesh.run();
+            if (run_step == NUM_TEST+1) {
+                success_count ++;
+            }
+            avg_train += run_step;
+        }
+        cout << "Success rate: " << success_count << endl;
+        cout << "Average steps: " << avg_train / NUM_TEST_ITER << endl;
+    }
+
+    // IntersectionMesh mesh = IntersectionMesh();
+    // chrono::steady_clock::time_point start = chrono::steady_clock::now();
+    // mesh.train();
+    // chrono::steady_clock::time_point end = chrono::steady_clock::now();
+    // cout << "Time: " << chrono::duration_cast<std::chrono::microseconds>(end - start).count() << endl;
+    // cout << "Coverage: " << mesh.get_coverage() << endl;
+    // //mesh.print();
+    // int avg_train = 0;
+    // int success_count = 0;
+    // for (int i = 0; i < NUM_TEST_ITER; i++) {
+    //     int run_step = mesh.run();
+    //     if (run_step == NUM_TEST+1) {
+    //         success_count ++;
+    //     }
+    //     avg_train += run_step;
+    // }
+    // cout << "Success rate: " << success_count / NUM_TEST_ITER << endl;
+    // cout << "Average steps: " << avg_train / NUM_TEST_ITER << endl;
+
     return 0;
 }

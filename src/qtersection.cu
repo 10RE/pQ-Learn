@@ -14,11 +14,11 @@ using namespace std;
 #define Q_KERNEL_SIZE SURROUNDING_SIZE * MESH_SIZE
 #define MAX_VEHICLE_NUM 8
 
-#define STATE_SIZE 4096 //(int)pow(MAX_VEHICLE_NUM, LANE_SIZE)
-#define Q_TABLE_SIZE 8192 //STATE_SIZE * ACTION_SIZE
-#define TOTAL_Q_TABLE_SIZE Q_TABLE_SIZE * MESH_SIZE
-
 #define LANE_SIZE 4
+
+#define STATE_SIZE (int)pow(MAX_VEHICLE_NUM, LANE_SIZE)
+#define Q_TABLE_SIZE STATE_SIZE * ACTION_SIZE
+#define TOTAL_Q_TABLE_SIZE Q_TABLE_SIZE * MESH_SIZE
 
 #define ENV_ITEM_SIZE 15
 
@@ -30,13 +30,14 @@ using namespace std;
 #define ALPHA 0.5
 #define BETA 0.1 //decay reward from surroundings
 #define GAMMA 0.1
-#define EPSILON 0.8
+#define EPSILON 0.4
 #define VEHICLE_RATE 0.3
 
 #define VERBOSE 0
 
-#define NUM_TRAIN 10000
+#define NUM_TRAIN 50000
 #define NUM_TEST 10000
+#define NUM_TEST_ITER 20
 
 #define NO_SURROUNDING 0
 
@@ -84,12 +85,12 @@ double get_coverage(double* q_table) {
     get_coverage_kernel<<<grid, block>>>(cover_count_cuda, q_table);
     cudaMemcpy(cover_count, cover_count_cuda, sizeof(int) * grid_size, cudaMemcpyDeviceToHost);
     int total = 0;
-    cout << TOTAL_Q_TABLE_SIZE << " " << grid_size << endl;
+    //cout << TOTAL_Q_TABLE_SIZE << " " << grid_size << endl;
     for (int i = 0; i < grid_size; i++) {
-        cout << cover_count[i] << " ";
+        //cout << cover_count[i] << " ";
         total += cover_count[i];
     }
-    cout << total << endl;
+    //cout << total << endl;
     return 1 - (double)total / (double)(TOTAL_Q_TABLE_SIZE / ACTION_SIZE);
 }
 
@@ -168,12 +169,16 @@ __device__ void increase_in_vehicle(int* env, int mesh_id, int lane) {
     *(env + mesh_id * ENV_ITEM_SIZE + 11 + lane) += 1;
 }
 
-__global__ void reset_env_kernel(int* env) {
+__global__ void reset_env_kernel(int* env, bool* is_end_state) {
     int id = threadIdx.x + blockIdx.x * blockDim.x;
     if (id >= ENV_SIZE) {
         return;
     }
-    set_env(env, id, 0);
+    if (*is_end_state) {
+        set_env(env, id, 0);
+        return;
+    }
+    
 }
 
 __device__ int get_state(int* state) {
@@ -373,9 +378,9 @@ __global__ void update_env_pre_kernel(int* environment, double* q_table, curandS
     #endif
     reset_vehicle_in(environment, id);
     set_next_state_id(environment, id, next_state_id);
-    __syncthreads();
+    //__syncthreads();
     cal_vehicle_out(environment, id, action);
-    __syncthreads();
+    //__syncthreads();
     //update_vehicle_in_with_out(environment, id, action);
 }
 
@@ -398,9 +403,9 @@ __global__ void update_env_pre_run_kernel(int* environment, double* q_table, cur
     }
     reset_vehicle_in(environment, id);
     set_next_state_id(environment, id, next_state_id);
-    __syncthreads();
+    //__syncthreads();
     cal_vehicle_out(environment, id, action);
-    __syncthreads();
+    //__syncthreads();
     //update_vehicle_in_with_out(environment, id, action);
 }
 
@@ -507,8 +512,8 @@ __global__ void cal_q_kernel_single(int* environment, double* reward, double* q_
     
     
     int* state = get_cur_state(environment, mesh_id);
-    int* actual_state = new int[LANE_SIZE];
-    int* next_state = new int[LANE_SIZE];
+    int actual_state[LANE_SIZE] = {0, 0, 0, 0};//new int[LANE_SIZE];
+    int next_state[LANE_SIZE] = {0, 0, 0, 0};
     if (surrounding_id == 0) {
         for (int i = 0; i < LANE_SIZE; i++){
             actual_state[i] = (int)state[i];
@@ -519,8 +524,6 @@ __global__ void cal_q_kernel_single(int* environment, double* reward, double* q_
             if ((surrounding_id - 1) / 2 == i) {
                 int tmp_state = state[i] + (surrounding_id % 2 == 0 ? 1 : -1);
                 if (tmp_state < 0 || tmp_state > MAX_VEHICLE_NUM) {
-                    delete[] actual_state;
-                    delete[] next_state;
                     return;
                 }
                 actual_state[i] = tmp_state > 0 ? (tmp_state < MAX_VEHICLE_NUM ? tmp_state : MAX_VEHICLE_NUM) : 0;
@@ -574,16 +577,13 @@ __global__ void cal_q_kernel_single(int* environment, double* reward, double* q_
     q_value += (1 - ALPHA) * cur_q;
     q_value += ALPHA * local_reward + BETA * surrounding_reward;
     q_value += ALPHA * GAMMA * next_q;
-    __syncthreads();
+    //__syncthreads();
     set_value_cuda(q_table, mesh_id, state_int, action, q_value);
 
     #if DEBUG
     __syncthreads();
     printf("q_value %d state: %d, %d, %d, %d, %d, action: %d, next_state: %d, %d, %d, %d, q_val: %f, reward: %f, surrounding: %f, q_val_0: %f, q_val_1: %f\n", mesh_id, state_int, actual_state[0], actual_state[1], actual_state[2], actual_state[3], action, next_state[0], next_state[1], next_state[2], next_state[3], next_q, local_reward, surrounding_reward, get_value_cuda(q_table, mesh_id, state_int, 0), get_value_cuda(q_table, mesh_id, state_int, 1));
     #endif
-   
-    delete[] actual_state;
-    delete[] next_state;
 }
 
 __device__ void generate_new_vehicel(int* environment, int mesh_id, curandState* rand_state) {
@@ -703,7 +703,7 @@ void train(double* qtable) {
     }
     rand_setup_kernel<<<MESH_SIZE, 1>>>(rand_states);
 
-    cout << train_step << endl;
+    // cout << train_step << endl;
     //QTable qtable = QTable();
 
     int* environment;
@@ -728,58 +728,68 @@ void train(double* qtable) {
     dim3 reward_grid(MESH_SIZE / mesh_block.x + 1);
     dim3 q_block(Q_KERNEL_SIZE < BLOCK_SIZE / ACTION_SIZE ? Q_KERNEL_SIZE : BLOCK_SIZE / ACTION_SIZE, ACTION_SIZE);
     dim3 q_grid(Q_KERNEL_SIZE / q_block.x + 1);
+
+    float time;
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    cudaEventRecord(start, 0);
+    
     while (train_step < NUM_TRAIN) {
-        cout << "======================" << endl;
-        cout << "start epoch: " << epoch_step << endl;
-        reset_env_kernel<<<env_grid, env_block>>>(environment);
+        // cout << "======================" << endl;
+        // cout << "start epoch: " << epoch_step << endl;
+            
+        #if DEBUG
+            // if (cudaMemcpy(
+            //     environment_cpu, 
+            //     environment, 
+            //     sizeof(int) * ENV_SIZE,
+            //     cudaMemcpyDeviceToHost
+            // ) != cudaSuccess) {
+            //     cout << "Could not copy to CPU" << endl;
+            // }
+            // for (int i = 0; i < MESH_SIZE; i++) {
+            //     cout << "intersection: " << i << endl;
+            //     for (int j = 0; j < LANE_SIZE; j++) {
+            //         cout << environment_cpu[i * ENV_ITEM_SIZE + j] << " ";
+            //     }
+            //     cout << endl;
+            // }
+        #endif
+        
+        is_end_state_kernel<<<mesh_grid, mesh_block>>>(environment, is_end_state_cuda);
+        //cudaEventRecord(start, 0);
+        reset_env_kernel<<<env_grid, env_block>>>(environment, is_end_state_cuda);
         reset_is_end_state_kernel<<<1, 1>>>(is_end_state_cuda);
-        while (1) {
 
-            #if DEBUG
-                // if (cudaMemcpy(
-                //     environment_cpu, 
-                //     environment, 
-                //     sizeof(int) * ENV_SIZE,
-                //     cudaMemcpyDeviceToHost
-                // ) != cudaSuccess) {
-                //     cout << "Could not copy to CPU" << endl;
-                // }
-                // for (int i = 0; i < MESH_SIZE; i++) {
-                //     cout << "intersection: " << i << endl;
-                //     for (int j = 0; j < LANE_SIZE; j++) {
-                //         cout << environment_cpu[i * ENV_ITEM_SIZE + j] << " ";
-                //     }
-                //     cout << endl;
-                // }
-            #endif
-
-            is_end_state_kernel<<<mesh_grid, mesh_block>>>(environment, is_end_state_cuda);
-            cudaDeviceSynchronize();
-            if(cudaMemcpy(
-                &is_end_state, 
-                is_end_state_cuda, 
-                sizeof(bool),
-                cudaMemcpyDeviceToHost
-            ) != cudaSuccess){
-                cout << "Could not copy to CPU" << endl;
-            }
-            if (is_end_state || train_step > NUM_TRAIN) {
-                break;
-            }
-            reset_is_end_state_kernel<<<1, 1>>>(is_end_state_cuda);
-            cout << "----------------------" << endl;
-            cout << "train step: " << train_step << endl;
-            update_env_pre_kernel<<<mesh_grid, mesh_block>>>(environment, qtable, rand_states);
-            update_reward_kernel<<<reward_grid, reward_block>>>(environment, reward);
-            cudaDeviceSynchronize();
-            //debug_reward_kernel<<<mesh_grid, mesh_block>>>(reward);
-            cal_q_kernel_single<<<q_grid, q_block>>>(environment, reward, qtable);
-            update_env_after_kernel<<<mesh_grid, mesh_block>>>(environment, qtable, rand_states);
-            cudaDeviceSynchronize();
-            train_step ++;
-        }
-        epoch_step ++;
+        // cout << "----------------------" << endl;
+        // cout << "train step: " << train_step << endl;
+        cudaEventRecord(start, 0);
+        update_env_pre_kernel<<<mesh_grid, mesh_block>>>(environment, qtable, rand_states);
+        update_reward_kernel<<<reward_grid, reward_block>>>(environment, reward);
+        cudaEventRecord(stop, 0);
+        cudaEventSynchronize(stop);
+        cudaEventElapsedTime(&time, start, stop);
+        
+        //debug_reward_kernel<<<mesh_grid, mesh_block>>>(reward);
+        
+        cal_q_kernel_single<<<q_grid, q_block>>>(environment, reward, qtable);
+        
+        cout << "Time: " << time << endl;
+        update_env_after_kernel<<<mesh_grid, mesh_block>>>(environment, qtable, rand_states);
+        
+        
+        //cudaDeviceSynchronize();
+        train_step ++;
     }
+
+    cudaEventRecord(stop, 0);
+    cudaEventSynchronize(stop);
+    cudaEventElapsedTime(&time, start, stop);
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+
+    cout << "Time: " << time << endl;
 
     cudaFree(environment);
     cudaFree(reward);
@@ -808,7 +818,7 @@ void train(double* qtable) {
 
 }
 
-void run(double* qtable) {
+int run(double* qtable) {
     int run_step = 0;
 
     curandState* rand_states;
@@ -839,8 +849,8 @@ void run(double* qtable) {
     dim3 mesh_grid(MESH_SIZE / mesh_block.x + 1);
     dim3 q_block(SURROUNDING_SIZE < BLOCK_SIZE / ACTION_SIZE ? SURROUNDING_SIZE : BLOCK_SIZE / ACTION_SIZE, ACTION_SIZE);
     dim3 q_grid(SURROUNDING_SIZE / q_block.x + 1);
-    reset_env_kernel<<<env_grid, env_block>>>(environment);
     reset_is_end_state_kernel<<<1, 1>>>(is_end_state_cuda);
+    reset_env_kernel<<<env_grid, env_block>>>(environment, is_end_state_cuda);
     while (1) {
 
         #if DEBUG
@@ -872,13 +882,13 @@ void run(double* qtable) {
             cout << "Could not copy to CPU" << endl;
         }
         if (is_end_state) {
-            cout << "test failed at step: " << run_step << endl;
+            // cout << "test failed at step: " << run_step << endl;
             //reset_env_kernel<<<env_grid, env_block>>>(environment);
             //reset_is_end_state_kernel<<<1, 1>>>(is_end_state_cuda);
             break;
         }
         else if (run_step > NUM_TEST) {
-            cout << "test success after step: " << run_step << endl;
+            // cout << "test success after step: " << run_step << endl;
             break;
         }
         reset_is_end_state_kernel<<<1, 1>>>(is_end_state_cuda);
@@ -889,6 +899,7 @@ void run(double* qtable) {
         cudaDeviceSynchronize();
         run_step ++;
     }
+    return run_step;
 
 }
 
@@ -907,12 +918,19 @@ int main() {
     }
 
     train(qtable);
-    cout << "coverage rate: " << get_coverage(qtable) << endl;
-    run(qtable);
-    run(qtable);
-    run(qtable);
-    run(qtable);
-    run(qtable);
+    
+    cout << "Coverage: " << get_coverage(qtable) << endl;
+    int avg_train = 0;
+    int success_count = 0;
+    for (int i = 0; i < NUM_TEST_ITER; i++) {
+        int run_step = run(qtable);
+        if (run_step == NUM_TEST + 1) {
+            success_count ++;
+        }
+        avg_train += run_step;
+    }
+    cout << "Success rate: " << success_count << endl;
+    cout << "Average steps: " << avg_train / NUM_TEST_ITER << endl;
 
     return 0;
 }
