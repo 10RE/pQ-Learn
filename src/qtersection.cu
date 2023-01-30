@@ -16,6 +16,7 @@ using namespace std;
 
 #define STATE_SIZE 4096 //(int)pow(MAX_VEHICLE_NUM, LANE_SIZE)
 #define Q_TABLE_SIZE 8192 //STATE_SIZE * ACTION_SIZE
+#define TOTAL_Q_TABLE_SIZE Q_TABLE_SIZE * MESH_SIZE
 
 #define LANE_SIZE 4
 
@@ -29,13 +30,13 @@ using namespace std;
 #define ALPHA 0.5
 #define BETA 0.1 //decay reward from surroundings
 #define GAMMA 0.1
-#define EPSILON 0.2
+#define EPSILON 0.8
 #define VEHICLE_RATE 0.3
 
 #define VERBOSE 0
 
 #define NUM_TRAIN 10000
-#define NUM_TEST 1000
+#define NUM_TEST 10000
 
 #define NO_SURROUNDING 0
 
@@ -45,6 +46,52 @@ using namespace std;
 
 #define USE_CUDA 0
 
+__global__ void get_coverage_kernel(int* coverage, double* q_table) {
+    __shared__ int not_covered_count;
+    if (threadIdx.x == 0) {
+        not_covered_count = 0;
+    }
+    int state = threadIdx.x + blockIdx.x * blockDim.x;
+    if (state >= (TOTAL_Q_TABLE_SIZE / 2)) {
+        return;
+    }
+    int main_offset = state * ACTION_SIZE;
+    bool covered_flag = false;
+    for (int i = 0; i < ACTION_SIZE; i++) {
+        if (q_table[main_offset + i] != 0) {
+            covered_flag = true;
+            break;
+        }
+    }
+    if (!covered_flag) {
+        atomicAdd(&not_covered_count, 1);
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        coverage[blockIdx.x] = not_covered_count;
+    }
+}
+
+double get_coverage(double* q_table) {
+    dim3 block(BLOCK_SIZE);
+    int grid_size = TOTAL_Q_TABLE_SIZE / ACTION_SIZE / block.x;
+    dim3 grid(grid_size);
+    int* cover_count = new int[grid_size];
+    int* cover_count_cuda;
+    if (cudaMalloc(&cover_count_cuda, sizeof(int) * grid_size) != cudaSuccess) {
+        printf("cudaMalloc for coverage failed\n");
+    }
+    get_coverage_kernel<<<grid, block>>>(cover_count_cuda, q_table);
+    cudaMemcpy(cover_count, cover_count_cuda, sizeof(int) * grid_size, cudaMemcpyDeviceToHost);
+    int total = 0;
+    cout << TOTAL_Q_TABLE_SIZE << " " << grid_size << endl;
+    for (int i = 0; i < grid_size; i++) {
+        cout << cover_count[i] << " ";
+        total += cover_count[i];
+    }
+    cout << total << endl;
+    return 1 - (double)total / (double)(TOTAL_Q_TABLE_SIZE / ACTION_SIZE);
+}
 
 /*
 0: cur_state_up
@@ -770,7 +817,7 @@ void run(double* qtable) {
     }
     rand_setup_kernel<<<MESH_SIZE, 1>>>(rand_states);
     
-    cout << run_step << endl;
+    //cout << run_step << endl;
 
     int* environment;
     if (cudaMalloc(&environment, sizeof(int) * ENV_SIZE) != cudaSuccess) {
@@ -835,9 +882,9 @@ void run(double* qtable) {
             break;
         }
         reset_is_end_state_kernel<<<1, 1>>>(is_end_state_cuda);
-        cout << "----------------------" << endl;
-        cout << "run step: " << run_step << endl;
-        update_env_pre_run_kernel<<<mesh_grid, mesh_block>>>(environment, qtable, rand_states, true);
+        //cout << "----------------------" << endl;
+        //cout << "run step: " << run_step << endl;
+        update_env_pre_run_kernel<<<mesh_grid, mesh_block>>>(environment, qtable, rand_states, false);
         update_env_after_kernel<<<mesh_grid, mesh_block>>>(environment, qtable, rand_states);
         cudaDeviceSynchronize();
         run_step ++;
@@ -860,6 +907,11 @@ int main() {
     }
 
     train(qtable);
+    cout << "coverage rate: " << get_coverage(qtable) << endl;
+    run(qtable);
+    run(qtable);
+    run(qtable);
+    run(qtable);
     run(qtable);
 
     return 0;
