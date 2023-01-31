@@ -7,8 +7,8 @@
 
 using namespace std;
 
-#define SIZE_X 8
-#define SIZE_Y 8
+#define SIZE_X 16
+#define SIZE_Y 16
 #define ACTION_SIZE 2
 #define MAX_VEHICLE_NUM 8
 
@@ -22,7 +22,7 @@ using namespace std;
 
 #define VERBOSE 0
 
-#define NUM_TRAIN 50000
+#define NUM_TRAIN 1000000
 #define NUM_TEST 10000
 #define NUM_TEST_ITER 20
 
@@ -838,7 +838,7 @@ public:
 
 int main() {
     int test_size_array[9] = {1000, 5000, 10000, 20000, 50000, 100000, 200000, 500000, 1000000};
-    for (int i = 5; i < 9; i++) {
+    for (int i = 8; i < 9; i++) {
         int num_train = test_size_array[i];
         cout << endl;
         cout << "NUM_TRAIN: " << num_train << endl;

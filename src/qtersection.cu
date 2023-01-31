@@ -6,8 +6,8 @@
 
 using namespace std;
 
-#define SIZE_X 8
-#define SIZE_Y 8
+#define SIZE_X 16
+#define SIZE_Y 16
 #define MESH_SIZE SIZE_X*SIZE_Y
 #define ACTION_SIZE 2
 #define SURROUNDING_SIZE 9
@@ -39,7 +39,7 @@ using namespace std;
 #define NUM_TEST 10000
 #define NUM_TEST_ITER 20
 
-#define NO_SURROUNDING 0
+#define NO_SURROUNDING 1
 
 #define DEBUG 0
 
@@ -536,7 +536,6 @@ __global__ void cal_q_kernel_single(int* environment, double* reward, double* q_
     }
 
     #if NO_SURROUNDING
-        int state_int = get_state(actual_state);
         int state_int = get_cur_state_id(environment, mesh_id);
 
         double cur_q = get_value_cuda(q_table, mesh_id, state_int, action);
